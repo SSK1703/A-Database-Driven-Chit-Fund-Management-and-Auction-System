@@ -1,0 +1,28 @@
+{
+  "name": "chitvault-system",
+  "version": "1.0.0",
+  "description": "Database-Driven Chit Fund Management and Auction System (PES University - Group 10)",
+  "main": "server/index.js",
+  "scripts": {
+    "server": "node server/index.js",
+    "client": "npm run dev --prefix client",
+    "build": "npm run build --prefix client",
+    "start": "node server/index.js",
+    "dev": "concurrently \"npm run server\" \"npm run client\""
+  },
+  "keywords": [
+    "chit-fund",
+    "dbms",
+    "mysql",
+    "auction-system"
+  ],
+  "author": "Shasank SK & Samartha MS",
+  "license": "MIT",
+  "dependencies": {
+    "concurrently": "^10.0.6",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "mysql2": "^3.24.6"
+  }
+}
