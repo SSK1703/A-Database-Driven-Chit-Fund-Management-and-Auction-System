@@ -1,40 +1,98 @@
+
 // API Client for ChitVault Backend
 
 const API_BASE = '/api';
+export function getAuthUser() {
+  if (typeof window === 'undefined') return null;
+
+  const user = sessionStorage.getItem('chitvault_user');
+
+  try {
+    return user ? JSON.parse(user) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveAuthUser(user) {
+  sessionStorage.setItem('chitvault_user', JSON.stringify(user));
+}
+
+export function getAuthToken() {
+  if (typeof window === 'undefined') return null;
+  return sessionStorage.getItem('chitvault_token');
+}
+
+export function saveAuthToken(token) {
+  sessionStorage.setItem('chitvault_token', token);
+}
+
+export function clearAuthToken() {
+  sessionStorage.removeItem('chitvault_token');
+  sessionStorage.removeItem('chitvault_user');
+}
 
 export async function fetchJson(endpoint, options = {}) {
+  const token = getAuthToken();
+
+  const headers = {
+    'Content-Type': 'application/json',
+    ...options.headers,
+  };
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
   const res = await fetch(`${API_BASE}${endpoint}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers
-    },
-    ...options
+    ...options,
+    headers,
   });
 
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(data.error || `HTTP ${res.status}: ${res.statusText}`);
+    throw new Error(data.error || data.message || `HTTP ${res.status}: ${res.statusText}`);
   }
 
   return data;
 }
 
 export const api = {
+  // Authentication
+  login: (credentials) => fetchJson('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify(credentials),
+  }),
+
   // DB & System
   getDbStatus: () => fetchJson('/db-status'),
-  updateDbConfig: (config) => fetchJson('/db-config', { method: 'POST', body: JSON.stringify(config) }),
-  
+  updateDbConfig: (config) => fetchJson('/db-config', {
+    method: 'POST',
+    body: JSON.stringify(config),
+  }),
+
   // Dashboard
   getDashboard: () => fetchJson('/dashboard'),
 
   // Groups
   getGroups: () => fetchJson('/groups'),
   getGroupById: (id) => fetchJson(`/groups/${id}`),
-  createGroup: (data) => fetchJson('/groups', { method: 'POST', body: JSON.stringify(data) }),
-  addMemberToGroup: (groupId, userId) => fetchJson(`/groups/${groupId}/add-member`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
-  generateCycles: (groupId) => fetchJson(`/groups/${groupId}/generate-cycles`, { method: 'POST' }),
-  updateGroupStatus: (groupId, status) => fetchJson(`/groups/${groupId}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  createGroup: (data) => fetchJson('/groups', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  addMemberToGroup: (groupId, userId) => fetchJson(`/groups/${groupId}/add-member`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId }),
+  }),
+  generateCycles: (groupId) => fetchJson(`/groups/${groupId}/generate-cycles`, {
+    method: 'POST',
+  }),
+  updateGroupStatus: (groupId, status) => fetchJson(`/groups/${groupId}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  }),
 
   // Cycles & Bidding
   getCycles: (params = {}) => {
@@ -42,34 +100,53 @@ export const api = {
     return fetchJson(`/cycles${qs ? `?${qs}` : ''}`);
   },
   getCycleById: (id) => fetchJson(`/cycles/${id}`),
-  updateCycleStatus: (id, status) => fetchJson(`/cycles/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  updateCycleStatus: (id, status) => fetchJson(`/cycles/${id}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  }),
   placeBid: (cycleId, userId, bidAmount) => fetchJson(`/cycles/${cycleId}/bid`, {
     method: 'POST',
-    body: JSON.stringify({ user_id: userId, bid_amount: bidAmount })
+    body: JSON.stringify({ user_id: userId, bid_amount: bidAmount }),
   }),
-  closeCycle: (cycleId) => fetchJson(`/cycles/${cycleId}/close`, { method: 'POST' }),
-  markDefaulters: (cycleId) => fetchJson(`/cycles/${cycleId}/mark-defaulters`, { method: 'POST' }),
+  closeCycle: (cycleId) => fetchJson(`/cycles/${cycleId}/close`, {
+    method: 'POST',
+  }),
+  markDefaulters: (cycleId) => fetchJson(`/cycles/${cycleId}/mark-defaulters`, {
+    method: 'POST',
+  }),
 
   // Payments
   getPayments: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return fetchJson(`/payments${qs ? `?${qs}` : ''}`);
   },
-  recordPayment: (data) => fetchJson('/payments', { method: 'POST', body: JSON.stringify(data) }),
+  recordPayment: (data) => fetchJson('/payments', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
 
   // Defaulters
   getDefaulters: () => fetchJson('/defaulters'),
   settleDefaulter: (defaultId, paymentDate) => fetchJson(`/defaulters/${defaultId}/settle`, {
     method: 'POST',
-    body: JSON.stringify({ payment_date: paymentDate })
+    body: JSON.stringify({ payment_date: paymentDate }),
   }),
 
   // Users & KYC
   getUsers: () => fetchJson('/users'),
-  createUser: (data) => fetchJson('/users', { method: 'POST', body: JSON.stringify(data) }),
+  createUser: (data) => fetchJson('/users', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
   getKycDocs: () => fetchJson('/kyc'),
-  submitKyc: (data) => fetchJson('/kyc', { method: 'POST', body: JSON.stringify(data) }),
-  updateKycStatus: (id, status) => fetchJson(`/kyc/${id}`, { method: 'PATCH', body: JSON.stringify({ verified_status: status }) }),
+  submitKyc: (data) => fetchJson('/kyc', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  updateKycStatus: (id, status) => fetchJson(`/kyc/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ verified_status: status }),
+  }),
 
   // Notifications & Audit
   getNotifications: (params = {}) => {
@@ -77,14 +154,27 @@ export const api = {
     return fetchJson(`/notifications${qs ? `?${qs}` : ''}`);
   },
   searchNotifications: (term) => fetchJson(`/notifications/search?term=${encodeURIComponent(term)}`),
-  markNotificationRead: (id) => fetchJson(`/notifications/${id}/read`, { method: 'PATCH' }),
+  markNotificationRead: (id) => fetchJson(`/notifications/${id}/read`, {
+    method: 'PATCH',
+  }),
   getAuditLog: () => fetchJson('/audit-log'),
 
   // DBMS Evaluation
   getViewData: (viewName) => fetchJson(`/views/${viewName}`),
-  executeFunction: (fnName, params) => fetchJson('/functions/calculate', { method: 'POST', body: JSON.stringify({ fnName, params }) }),
+  executeFunction: (fnName, params) => fetchJson('/functions/calculate', {
+    method: 'POST',
+    body: JSON.stringify({ fnName, params }),
+  }),
   getPresetQueries: () => fetchJson('/preset-queries'),
-  runPresetQuery: (id) => fetchJson(`/preset-queries/${id}/run`, { method: 'POST' }),
-  runCustomQuery: (sql) => fetchJson('/custom-query', { method: 'POST', body: JSON.stringify({ sql }) }),
-  runTransactionDemo: (demoType) => fetchJson('/transactions/run-demo', { method: 'POST', body: JSON.stringify({ demoType }) }),
+  runPresetQuery: (id) => fetchJson(`/preset-queries/${id}/run`, {
+    method: 'POST',
+  }),
+  runCustomQuery: (sql) => fetchJson('/custom-query', {
+    method: 'POST',
+    body: JSON.stringify({ sql }),
+  }),
+  runTransactionDemo: (demoType) => fetchJson('/transactions/run-demo', {
+    method: 'POST',
+    body: JSON.stringify({ demoType }),
+  }),
 };

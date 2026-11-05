@@ -1,3 +1,4 @@
+"use client";
 import React, { useState, useEffect } from 'react';
 import Navbar from './components/Navbar';
 import DashboardTab from './components/DashboardTab';
@@ -8,11 +9,24 @@ import DefaultersTab from './components/DefaultersTab';
 import MembersTab from './components/MembersTab';
 import DbmsEvaluationTab from './components/DbmsEvaluationTab';
 import NotificationsModal from './components/NotificationsModal';
-import { api } from './api';
+import {
+  api,
+  getAuthToken,
+  getAuthUser,
+  saveAuthToken,
+  saveAuthUser,
+  clearAuthToken
+} from './api';
+
+import LoginScreen from './components/LoginScreen.jsx';
 import { Database, ShieldCheck } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [currentUser, setCurrentUser] = useState(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
   const [dbStatus, setDbStatus] = useState(null);
   const [dashboardData, setDashboardData] = useState(null);
   const [groups, setGroups] = useState([]);
@@ -23,6 +37,41 @@ export default function App() {
   const [selectedCycleId, setSelectedCycleId] = useState(null);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const handleLogin = async (credentials) => {
+  setLoginLoading(true);
+  setLoginError('');
+
+  try {
+    const result = await api.login(credentials);
+
+    saveAuthToken(result.token);
+    saveAuthUser(result.user);
+
+    setCurrentUser(result.user);
+    setIsAuthenticated(true);
+
+    await loadAllData();
+  } catch (error) {
+    setLoginError(error.message);
+  } finally {
+    setLoginLoading(false);
+  }
+};
+
+const handleLogout = () => {
+  clearAuthToken();
+
+  setCurrentUser(null);
+  setCurrentPersona(null);
+  setIsAuthenticated(false);
+
+  setDashboardData(null);
+  setGroups([]);
+  setCycles([]);
+  setUsers([]);
+  setNotifications([]);
+  setLoading(true);
+};
 
   const loadAllData = async () => {
     try {
@@ -52,11 +101,30 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
+ useEffect(() => {
+  const token = getAuthToken();
+  const savedUser = getAuthUser();
+
+  if (token && savedUser) {
+    setCurrentUser(savedUser);
+    setIsAuthenticated(true);
     loadAllData();
-  }, []);
+  } else {
+    clearAuthToken();
+    setLoading(false);
+  }
+}, []);
 
   const unreadCount = notifications.filter(n => !n.read_status).length;
+  if (!isAuthenticated) {
+  return (
+    <LoginScreen
+      onLogin={handleLogin}
+      error={loginError}
+      loading={loginLoading}
+    />
+  );
+}
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -68,9 +136,8 @@ export default function App() {
         notifications={notifications}
         unreadCount={unreadCount}
         onOpenNotifications={() => setIsNotificationsOpen(true)}
-        currentPersona={currentPersona}
-        setCurrentPersona={setCurrentPersona}
-        users={users}
+        currentUser={currentUser}
+        onLogout={handleLogout}
         onRefresh={loadAllData}
       />
 
@@ -85,6 +152,7 @@ export default function App() {
           <>
             {activeTab === 'dashboard' && (
               <DashboardTab
+              currentUser={currentUser}
                 dashboardData={dashboardData}
                 groups={groups}
                 cycles={cycles}

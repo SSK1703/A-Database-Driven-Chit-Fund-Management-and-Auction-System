@@ -1,9 +1,12 @@
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
+
 const { pool, query, testConnection, updateConfig, getDbConfig } = require('./db');
 const { PRESET_QUERIES } = require('./presetQueries');
+const { logActivity } = require('./mongo');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -11,11 +14,144 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Serve static frontend if built
-const clientDist = path.join(__dirname, '..', 'client', 'dist');
-if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
+// MongoDB audit logging (best-effort)
+async function recordActivity(event) {
+  try {
+    await logActivity(event);
+    console.log('MongoDB audit event recorded:', event.action);
+  } catch (error) {
+    console.error('MongoDB audit logging failed:', error.message);
+  }
 }
+
+// JWT Authentication Middleware
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  const token = authHeader?.startsWith('Bearer ')
+    ? authHeader.slice(7)
+    : null;
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      error: 'Authentication required.'
+    });
+  }
+
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      error: 'Invalid or expired authentication token.'
+    });
+  }
+}
+
+// Role-Based Authorization Middleware
+function authorizeRoles(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        error: 'You do not have permission to perform this action.'
+      });
+    }
+
+    next();
+  };
+}
+
+// -------------------------------------------------------------
+// GLOBAL API AUTHENTICATION & ROLE AUTHORIZATION
+// -------------------------------------------------------------
+app.use('/api', (req, res, next) => {
+  const route = req.originalUrl.split('?')[0].replace(/^\/api/, '');
+
+  // Login and public member registration do not need a token.
+  if (
+    route === '/auth/login' ||
+    route === '/auth/register'
+  ) {
+    return next();
+  }
+
+  authenticateToken(req, res, () => {
+    const role = req.user.role;
+    const method = req.method;
+
+    // Admin-only endpoints
+    const adminOnly =
+      route === '/db-config' ||
+      route === '/users' ||
+      route.startsWith('/kyc') && method !== 'POST' ||
+      route === '/audit-log' ||
+      route === '/mongo-audit-logs' ||
+      route.startsWith('/views/') ||
+      route === '/functions/calculate' ||
+      route === '/preset-queries' ||
+      route.startsWith('/preset-queries/') ||
+      route === '/custom-query' ||
+      route === '/transactions/run-demo';
+
+    if (adminOnly && role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Admin access required.'
+      });
+    }
+
+    // Members can only access read-only features and place their own bids.
+    if (role === 'member') {
+      const allowedRead =
+        method === 'GET' &&
+        (
+          route === '/db-status' ||
+          route === '/dashboard' ||
+          route === '/groups' ||
+          /^\/groups\/\d+$/.test(route) ||
+          route === '/cycles' ||
+          /^\/cycles\/\d+$/.test(route) ||
+          route === '/payments' ||
+          route === '/notifications' ||
+          route === '/notifications/search'
+        );
+
+      const allowedBid =
+        method === 'POST' &&
+        /^\/cycles\/\d+\/bid$/.test(route);
+
+      const allowedKycSubmission =
+        method === 'POST' && route === '/kyc';
+
+      if (!allowedRead && !allowedBid && !allowedKycSubmission) {
+        return res.status(403).json({
+          success: false,
+          error: 'Members do not have permission to perform this action.'
+        });
+      }
+
+      // A member cannot submit another user's ID.
+      if (allowedBid || allowedKycSubmission) {
+        req.body.user_id = req.user.userId;
+      }
+
+      // Members can only see their own payments and notifications.
+      if (method === 'GET' && route === '/payments') {
+        req.query.user_id = String(req.user.userId);
+      }
+
+      if (method === 'GET' && route === '/notifications') {
+        req.query.user_id = String(req.user.userId);
+      }
+    }
+
+    next();
+  });
+});
+
 
 // -------------------------------------------------------------
 // Database Status & Configuration
@@ -143,10 +279,14 @@ app.get('/api/dashboard', async (req, res) => {
 // -------------------------------------------------------------
 // Chit Groups
 // -------------------------------------------------------------
+// Get groups according to authenticated user's role
 app.get('/api/groups', async (req, res) => {
   try {
-    const [rows] = await pool.query(`
-      SELECT 
+    const role = String(req.user.role).toLowerCase();
+    const userId = req.user.userId;
+
+    let sql = `
+      SELECT
         cg.group_id,
         cg.group_name,
         u.name AS organizer,
@@ -156,16 +296,42 @@ app.get('/api/groups', async (req, res) => {
         cg.duration_months,
         cg.max_members,
         fn_member_count(cg.group_id) AS current_members,
-        (SELECT COUNT(*) FROM MonthlyCycles mc WHERE mc.group_id = cg.group_id AND mc.status = 'closed') AS cycles_completed,
-        (SELECT COUNT(*) FROM MonthlyCycles mc WHERE mc.group_id = cg.group_id) AS total_cycles_generated,
+        (SELECT COUNT(*) FROM MonthlyCycles mc
+         WHERE mc.group_id = cg.group_id AND mc.status = 'closed') AS cycles_completed,
+        (SELECT COUNT(*) FROM MonthlyCycles mc
+         WHERE mc.group_id = cg.group_id) AS total_cycles_generated,
         cg.start_date,
         cg.status
       FROM ChitGroups cg
       JOIN Users u ON u.user_id = cg.organizer_id
-      ORDER BY cg.group_id ASC
-    `);
+    `;
+
+    const params = [];
+
+    if (role === 'organizer') {
+      sql += ' WHERE cg.organizer_id = ?';
+      params.push(userId);
+    } else if (role === 'member') {
+      sql += `
+        WHERE EXISTS (
+          SELECT 1
+          FROM GroupMembers gm
+          WHERE gm.group_id = cg.group_id
+          AND gm.user_id = ?
+        )
+      `;
+      params.push(userId);
+    } else if (role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    sql += ' ORDER BY cg.group_id ASC';
+
+    const [rows] = await pool.query(sql, params);
     res.json(rows);
+
   } catch (error) {
+    console.error('Groups error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -440,6 +606,16 @@ app.post('/api/cycles/:id/bid', async (req, res) => {
     // 1) trg_prevent_repeat_bid: cannot bid if already won payout
     // 2) trg_validate_bid: cycle must be in 'bidding' status, bid <= 30% of total chit amount, user must be active member
     const [result] = await pool.query('CALL sp_place_bid(?, ?, ?)', [cycleId, parseInt(user_id, 10), parseFloat(bid_amount)]);
+
+    await recordActivity({
+  action: 'BID_PLACED',
+  entityType: 'bid',
+  details: {
+    cycleId,
+    userId: parseInt(user_id, 10),
+    bidAmount: parseFloat(bid_amount)
+  }
+});
     
     res.json({
       success: true,
@@ -450,6 +626,7 @@ app.post('/api/cycles/:id/bid', async (req, res) => {
     res.status(400).json({ error: error.sqlMessage || error.message });
   }
 });
+
 
 // Close cycle & disburse payout via sp_close_cycle
 app.post('/api/cycles/:id/close', async (req, res) => {
@@ -468,12 +645,21 @@ app.post('/api/cycles/:id/close', async (req, res) => {
   }
 });
 
+
 // Mark defaulters via sp_mark_defaulters
 app.post('/api/cycles/:id/mark-defaulters', async (req, res) => {
   try {
     const cycleId = parseInt(req.params.id, 10);
     // CALL sp_mark_defaulters(cycle_id)
     const [result] = await pool.query('CALL sp_mark_defaulters(?)', [cycleId]);
+
+    await recordActivity({
+  action: 'AUCTION_CLOSED',
+  entityType: 'auction',
+  entityId: cycleId,
+  details: { cycleId }
+});
+
     res.json({
       success: true,
       message: 'Defaulters scan completed.',
@@ -487,11 +673,15 @@ app.post('/api/cycles/:id/mark-defaulters', async (req, res) => {
 // -------------------------------------------------------------
 // Payments
 // -------------------------------------------------------------
+
 app.get('/api/payments', async (req, res) => {
   try {
-    const { cycle_id, user_id, status } = req.query;
+    const role = String(req.user.role).toLowerCase();
+    const userId = req.user.userId;
+    const { cycle_id, status, user_id } = req.query;
+
     let sql = `
-      SELECT 
+      SELECT
         p.payment_id,
         p.cycle_id,
         p.user_id,
@@ -509,27 +699,45 @@ app.get('/api/payments', async (req, res) => {
       JOIN ChitGroups cg ON cg.group_id = mc.group_id
       WHERE 1=1
     `;
+
     const params = [];
+
+    if (role === 'member') {
+      sql += ' AND p.user_id = ?';
+      params.push(userId);
+    } else if (role === 'organizer') {
+      sql += ' AND cg.organizer_id = ?';
+      params.push(userId);
+    } else if (role === 'admin') {
+      if (user_id) {
+        sql += ' AND p.user_id = ?';
+        params.push(user_id);
+      }
+    } else {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
     if (cycle_id) {
       sql += ' AND p.cycle_id = ?';
       params.push(cycle_id);
     }
-    if (user_id) {
-      sql += ' AND p.user_id = ?';
-      params.push(user_id);
-    }
+
     if (status) {
       sql += ' AND p.status = ?';
       params.push(status);
     }
+
     sql += ' ORDER BY p.payment_id DESC';
 
     const [rows] = await pool.query(sql, params);
     res.json(rows);
+
   } catch (error) {
+    console.error('Payments error:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
 
 // Record payment via sp_record_payment
 app.post('/api/payments', async (req, res) => {
@@ -543,6 +751,17 @@ app.post('/api/payments', async (req, res) => {
       parseFloat(amount_paid),
       payment_date || new Date().toISOString().split('T')[0]
     ]);
+
+    await recordActivity({
+  action: 'PAYMENT_RECORDED',
+  entityType: 'payment',
+  details: {
+    cycleId: parseInt(cycle_id, 10),
+    userId: parseInt(user_id, 10),
+    amountPaid: parseFloat(amount_paid)
+  }
+});
+
     res.json({
       success: true,
       result: result[0] ? result[0][0] : 'Payment recorded'
@@ -551,6 +770,7 @@ app.post('/api/payments', async (req, res) => {
     res.status(400).json({ error: error.sqlMessage || error.message });
   }
 });
+
 
 // -------------------------------------------------------------
 // Defaulters & Transaction Settlement
@@ -622,6 +842,7 @@ app.post('/api/defaulters/:id/settle', async (req, res) => {
       WHERE cycle_id = ? AND user_id = ?
     `, [cycle_id, user_id]);
 
+
     // 3. Insert notification
     await connection.query(`
       INSERT INTO Notifications (user_id, message, type)
@@ -642,6 +863,91 @@ app.post('/api/defaulters/:id/settle', async (req, res) => {
     res.status(500).json({ error: error.sqlMessage || error.message });
   }
 });
+    // User Login
+app.post('/api/auth/login', async (req, res) => 
+  {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email and password are required.'
+      });
+    }
+
+    const [users] = await pool.query(
+      `SELECT user_id, name, email, password_hash, role, kyc_verified
+       FROM Users
+       WHERE email = ?
+       LIMIT 1`,
+      [email.trim().toLowerCase()]
+    );
+
+    if (users.length === 0) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid email or password.'
+      });
+    }
+
+    const user = users[0];
+
+    const passwordMatches = await bcrypt.compare(
+      password,
+      user.password_hash
+    );
+
+    if (!passwordMatches) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid email or password.'
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        userId: user.user_id,
+        role: user.role
+      },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: process.env.JWT_EXPIRES_IN || '1d'
+      }
+    );
+
+    await recordActivity({
+      action: 'USER_LOGIN',
+      entityType: 'user',
+      entityId: user.user_id,
+      details: {
+        role: user.role
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Login successful.',
+      token,
+      user: {
+        user_id: user.user_id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        kyc_verified: user.kyc_verified
+      }
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+
+    res.status(500).json({
+      success: false,
+      error: 'Login failed.'
+    });
+  }
+});
+
 
 // -------------------------------------------------------------
 // Users & KYC
@@ -663,24 +969,78 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-app.post('/api/users', async (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { name, email, phone, city, password, role } = req.body;
-    if (!phone || phone.length < 10) {
-      return res.status(400).json({ error: 'Check constraint violation: phone must have at least 10 characters.' });
+    const { name, email, phone, city, password } = req.body;
+
+    // Validate required fields
+    if (!name || !email || !phone || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Name, email, phone and password are required.'
+      });
     }
+
+    if (phone.length < 10) {
+      return res.status(400).json({
+        success: false,
+        error: 'Phone must contain at least 10 characters.'
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password must contain at least 8 characters.'
+      });
+    }
+
+    // Hash password using bcrypt
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // Public registration always creates a member
     const [result] = await pool.query(`
-      INSERT INTO Users (name, email, phone, city, password_hash, role, kyc_verified)
-      VALUES (?, ?, ?, ?, ?, ?, FALSE)
-    `, [name, email, phone, city || 'Bengaluru', `hash_${name.toLowerCase().replace(/\s+/g, '_')}`, role || 'member']);
-    
+      INSERT INTO Users
+      (name, email, phone, city, password_hash, role, kyc_verified)
+      VALUES (?, ?, ?, ?, ?, 'member', FALSE)
+    `, [
+      name.trim(),
+      email.trim().toLowerCase(),
+      phone.trim(),
+      city || 'Bengaluru',
+      passwordHash
+    ]);
+
+    // Preserve MongoDB audit logging
+    await recordActivity({
+      action: 'USER_REGISTERED',
+      entityType: 'user',
+      entityId: result.insertId,
+      details: {
+        role: 'member'
+      }
+    });
+
     res.status(201).json({
       success: true,
       user_id: result.insertId,
       message: 'User registered successfully'
     });
+
   } catch (error) {
-    res.status(400).json({ error: error.sqlMessage || error.message });
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        success: false,
+        error: 'Email or phone number already registered.'
+      });
+    }
+
+    console.error('Registration error:', error);
+
+    res.status(500).json({
+      success: false,
+      error: 'Registration failed.'
+    });
   }
 });
 
@@ -742,7 +1102,9 @@ app.patch('/api/kyc/:id', async (req, res) => {
 // -------------------------------------------------------------
 app.get('/api/notifications', async (req, res) => {
   try {
-    const { user_id } = req.query;
+    const user_id = req.user.role === 'member'
+  ? req.user.userId
+  : req.query.user_id;
     let sql = `
       SELECT n.*, u.name AS user_name 
       FROM Notifications n
@@ -768,13 +1130,16 @@ app.get('/api/notifications/search', async (req, res) => {
     if (!term) {
       return res.json([]);
     }
-    // Full text search as in Query 17
-    const [rows] = await pool.query(`
-      SELECT notif_id, user_id, message, type, sent_at
-      FROM Notifications 
-      WHERE MATCH(message) AGAINST(? IN BOOLEAN MODE)
-    `, [term]);
-    res.json(rows);
+    const isMember = req.user.role === 'member';
+
+const [rows] = await pool.query(`
+  SELECT notif_id, user_id, message, type, sent_at
+  FROM Notifications
+  WHERE MATCH(message) AGAINST(? IN BOOLEAN MODE)
+  ${isMember ? 'AND user_id = ?' : ''}
+`, isMember ? [term, req.user.userId] : [term]);
+
+res.json(rows);
   } catch (error) {
     res.status(500).json({ error: error.sqlMessage || error.message });
   }
@@ -1048,18 +1413,38 @@ app.post('/api/transactions/run-demo', async (req, res) => {
   }
 });
 
-// Fallback for SPA client routes
-app.use((req, res) => {
-  const indexHtml = path.join(clientDist, 'index.html');
-  if (fs.existsSync(indexHtml)) {
-    res.sendFile(indexHtml);
-  } else {
+// MongoDB Activity Logs
+app.get('/api/mongo-audit-logs', async (req, res) => {
+  try {
+    const { connectMongo } = require('./mongo');
+    const db = await connectMongo();
+
+    const logs = await db.collection('activity_logs')
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .toArray();
+
     res.json({
-      message: 'ChitVault API is running',
-      version: '1.0.0',
-      clientReady: false
+      success: true,
+      count: logs.length,
+      logs
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
+});
+
+// Fallback for SPA client routes
+// API fallback for unknown routes
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'API endpoint not found'
+  });
 });
 
 app.listen(PORT, () => {

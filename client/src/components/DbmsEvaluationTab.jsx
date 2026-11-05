@@ -65,16 +65,21 @@ export default function DbmsEvaluationTab({ users, groups, cycles }) {
   }, []);
 
   const loadPresetQueries = async () => {
-    try {
-      const data = await api.getPresetQueries();
-      setPresetQueries(data);
-      if (data.length > 0) {
-        setSelectedQuery(data[0]);
-      }
-    } catch (err) {
-      console.error(err);
+  try {
+    const data = await api.getPresetQueries();
+
+    console.log('PRESET QUERIES RESPONSE:', data);
+    console.log('PRESET QUERIES COUNT:', data?.length);
+
+    setPresetQueries(Array.isArray(data) ? data : []);
+
+    if (Array.isArray(data) && data.length > 0) {
+      setSelectedQuery(data[0]);
     }
-  };
+  } catch (err) {
+    console.error('FAILED TO LOAD PRESET QUERIES:', err);
+  }
+};
 
   const handleRunPresetQuery = async (queryItem) => {
     setRunningQuery(true);
