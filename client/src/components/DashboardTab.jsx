@@ -16,17 +16,78 @@ import {
   History
 } from 'lucide-react';
 
-export default function DashboardTab({ 
-  dashboardData, 
-  groups, 
-  cycles, 
-  setActiveTab, 
+export default function DashboardTab({
+  dashboardData,
+  groups,
+  cycles,
+  setActiveTab,
   onSelectCycle,
-  onOpenNewGroup
+  onOpenNewGroup,
+  currentUser
 }) {
   const { groups: grpSummary, users: usrSummary, financials, auctions, pendingDefaulters, recentBids, recentAudit } = dashboardData || {};
 
   const activeAuctions = cycles.filter(c => c.status === 'bidding');
+  const userRole = String(currentUser?.role || '').toLowerCase().trim();
+
+if (userRole === 'member') {
+  return (
+    <div className="space-y-6 animate-in fade-in">
+      <div className="bg-gradient-to-r from-slate-900 to-emerald-950/40 border border-slate-800 rounded-2xl p-8">
+        <span className="text-xs text-emerald-400 font-bold uppercase">
+          Member Dashboard
+        </span>
+
+        <h1 className="text-2xl font-black text-white mt-3">
+          Welcome, {currentUser?.name}!
+        </h1>
+
+        <p className="text-sm text-slate-400 mt-2">
+          Welcome to CHITVAULT. Manage your chit fund participation
+          and stay updated with your auctions and payments.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {[
+          {
+            title: 'My Chit Groups',
+            description: 'View your enrolled chit groups',
+            tab: 'groups',
+            icon: '💰'
+          },
+          {
+            title: 'My Payments',
+            description: 'View your payment records',
+            tab: 'payments',
+            icon: '💳'
+          },
+          {
+            title: 'Live Auctions',
+            description: 'View available auction information',
+            tab: 'auctions',
+            icon: '⚡'
+          }
+        ].map(item => (
+          <button
+            key={item.tab}
+            onClick={() => setActiveTab(item.tab)}
+            className="text-left p-6 rounded-2xl bg-slate-900 border border-slate-800 hover:border-emerald-500/50 transition"
+          >
+            <div className="text-2xl">{item.icon}</div>
+            <h2 className="text-white font-bold mt-3">{item.title}</h2>
+            <p className="text-xs text-slate-400 mt-2">
+              {item.description}
+            </p>
+            <span className="text-emerald-400 text-xs mt-4 block">
+              Open →
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
   return (
     <div className="space-y-6 animate-in fade-in">
@@ -50,13 +111,15 @@ export default function DashboardTab({
 
         {/* Action Shortcuts */}
         <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            onClick={onOpenNewGroup}
-            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition shadow-lg shadow-emerald-600/20"
-          >
-            <PlusCircle className="w-4 h-4" />
-            <span>Create Group</span>
-          </button>
+          {userRole === 'admin' && (
+  <button
+    onClick={onOpenNewGroup}
+    className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition shadow-lg shadow-emerald-600/20"
+  >
+    <PlusCircle className="w-4 h-4" />
+    <span>Create Group</span>
+  </button>
+)}
           <button
             onClick={() => setActiveTab('auctions')}
             className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition shadow-lg shadow-indigo-600/20"
@@ -64,13 +127,15 @@ export default function DashboardTab({
             <Gavel className="w-4 h-4" />
             <span>Auction Arena</span>
           </button>
-          <button
-            onClick={() => setActiveTab('evaluation')}
-            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 text-xs font-bold rounded-xl transition"
-          >
-            <span>DBMS Lab (19 Queries)</span>
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
+          {userRole === 'admin' && (
+  <button
+    onClick={() => setActiveTab('evaluation')}
+    className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 text-xs font-bold rounded-xl transition"
+  >
+    <span>DBMS Lab (19 Queries)</span>
+    <ArrowUpRight className="w-3.5 h-3.5" />
+  </button>
+)}
         </div>
       </div>
 

@@ -19,3 +19,13 @@ pnpm-debug.log*
 # OS Files
 Thumbs.db
 .DS_Store
+
+# Next.js build output
+client/.next/
+
+# Legacy Vite build output
+client/dist/
+
+# Dependencies
+node_modules/
+client/node_modules/
